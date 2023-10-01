@@ -215,8 +215,8 @@ class DirectionalStrategyBase(ScriptStrategyBase):
             lines.extend(executor.to_format_status())
         if self.all_candles_ready:
             lines.extend(["\n################################## Market Data ##################################\n"])
-            lines.extend([f"Value: {self.get_signal()}"])
-            lines.extend(self.market_data_extra_info())
+            # lines.extend([f"Value: {self.get_signal()}"])
+            # lines.extend(self.market_data_extra_info())
         else:
             lines.extend(["", "  No data collected."])
 
