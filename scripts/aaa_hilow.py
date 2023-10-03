@@ -23,9 +23,9 @@ class HiLow(DirectionalStrategyBase):
     # Configure the parameters for the position
     max_executors: int = 1
     stop_loss: float = 0.008
-    take_profit: float = 0.01
+    take_profit: float = 0.013
     time_limit: int = None
-    open_order_time_limit: int = 300
+    open_order_time_limit: int = 5 * 60
     trailing_stop_activation_delta = 0.15 + 0.0015  # take profit + fee
     trailing_stop_trailing_delta = 0.01
 
@@ -34,8 +34,13 @@ class HiLow(DirectionalStrategyBase):
                                          interval="5m", max_records=10)]
     markets = {exchange: {trading_pair}}
 
-    whale_diff = 0.01
+    whale_diff = Decimal(0.01)
     bars_look_back = 4
+
+    downtrend_skew_order_id = None
+    downtrend_skew = Decimal(0.0038)
+    downtrend_skew_active = False
+    current_downtrend_skew: Decimal = Decimal(0)
 
     @property
     def last_tick_timestamp(self):
@@ -43,6 +48,7 @@ class HiLow(DirectionalStrategyBase):
 
     def on_tick(self):
         self.clean_and_store_executors()
+        self.adjust_downtrend_skew()
         # self.stored_executors
         if self.is_perpetual:
             self.check_and_set_leverage()
@@ -55,13 +61,11 @@ class HiLow(DirectionalStrategyBase):
                 )
                 self.active_executors.append(signal_executor)
 
-    def is_last_executor_unprofitable(self):
-        if len(self.stored_executors) > 0:
-            return self.stored_executors[-1].close_type == CloseType.STOP_LOSS
-        else:
-            return False
-
     def get_position_config(self):
+        signal = self.get_signal()
+        if signal == 0:
+            return None
+
         side = TradeType.BUY
         price = self.buy_price
         position_config = SafeProfitPositionConfig(
@@ -83,9 +87,8 @@ class HiLow(DirectionalStrategyBase):
             #     trailing_delta=self.trailing_stop_trailing_delta
             # ),
             leverage=self.leverage,
-            safe_profit=Decimal(0.37),
-            safe_profit_apply_after=60 * 5 * 270,
-            downtrend_skew=0.35,
+            safe_profit=Decimal(0.0037),
+            safe_profit_apply_after=60 * 5 * 200,
             open_order_time_limit=self.open_order_time_limit
         )
         return position_config
@@ -114,14 +117,70 @@ class HiLow(DirectionalStrategyBase):
         lines.extend([f"Buy-Ask diff: {self.best_ask - self.buy_price}"])
         return lines
 
-    @property
-    def buy_price(self):
-        return round(Decimal(self.highest_low) * Decimal(1 - self.whale_diff), 4)
+    def adjust_downtrend_skew(self):
+        if self.is_last_executor_unprofitable and not self.downtrend_skew_active:
+            close_order_id = self.stored_executors[-1].close_order.order_id
+
+            if close_order_id != self.downtrend_skew_order_id:
+                self.downtrend_skew_order_id = close_order_id
+                self.downtrend_skew_active = True
+                self.current_downtrend_skew = self.downtrend_skew
+
+        if self.downtrend_skew_active:
+            df = self.candles[0].candles_df
+            if df.iloc[-1]['low'] > df.iloc[-8]['low']:
+                self.downtrend_skew_active = False
+                self.current_downtrend_skew = Decimal(0)
 
     @property
-    def highest_low(self):
-        return self.candles[0].candles_df.tail(self.bars_look_back)['low'].max()
+    def buy_price(self) -> Decimal:
+        return Decimal(round(
+            self.highest_low
+            * (1 - self.whale_diff)
+            * (1 - self.current_downtrend_skew),
+            4
+        ))
+
+    @property
+    def highest_low(self) -> Decimal:
+        return Decimal(self.candles[0].candles_df.tail(self.bars_look_back)['low'].max())
 
     @property
     def best_ask(self):
         return self.connectors[self.exchange].get_price_by_type(self.trading_pair, PriceType.BestAsk)
+
+    @property
+    def is_last_executor_unprofitable(self):
+        if len(self.stored_executors) > 0:
+            return self.stored_executors[-1].close_type == CloseType.STOP_LOSS
+        else:
+            return False
+
+    def format_status(self) -> str:
+        """
+        Displays the three candlesticks involved in the script with RSI, BBANDS and EMA.
+        """
+        if not self.ready_to_trade:
+            return "Market connectors are not ready."
+        lines = []
+
+        if len(self.stored_executors) > 0:
+            lines.extend(["\nClosed Executors:"])
+
+        total_net_pnl = 0
+        total_net_pnl_quote = 0
+        for executor in self.stored_executors:
+            lines.extend(executor.to_format_status())
+            total_net_pnl += executor.net_pnl
+            total_net_pnl_quote += executor.net_pnl_quote
+
+        if len(self.active_executors) > 0:
+            lines.extend(["\nActive Executors:"])
+
+            for executor in self.active_executors:
+                lines.extend([f"|Signal id: {executor.position_config.timestamp}"])
+                lines.extend(executor.to_format_status())
+
+        lines.extend([f"Total: {total_net_pnl * 100:7.2f}% {total_net_pnl_quote:7.4f}"])
+
+        return "\n".join(lines)

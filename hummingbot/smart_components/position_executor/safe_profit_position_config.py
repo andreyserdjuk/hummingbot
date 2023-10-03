@@ -9,4 +9,3 @@ class SafeProfitPositionConfig(PositionConfig):
     open_order_time_limit: Optional[int] = None
     safe_profit: Decimal
     safe_profit_apply_after: float
-    downtrend_skew: float

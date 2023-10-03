@@ -1,6 +1,7 @@
+from datetime import datetime
 from decimal import Decimal
 
-from hummingbot.core.data_type.common import TradeType
+from hummingbot.core.data_type.common import OrderType, TradeType
 from hummingbot.core.event.events import MarketOrderFailureEvent
 from hummingbot.smart_components.position_executor.data_types import CloseType, PositionExecutorStatus
 from hummingbot.smart_components.position_executor.position_executor import PositionExecutor
@@ -35,6 +36,18 @@ class SafeProfitPositionExecutor(PositionExecutor):
             )
             self.logger().info("Removing open order by time limit")
 
+    def control_take_profit(self):
+        if self.take_profit_order_type.is_limit_type():
+            if not self.take_profit_order.order_id:
+                self.place_take_profit_limit_order()
+            elif (
+                    self.take_profit_order_type == OrderType.MARKET
+                    and self.take_profit_order.executed_amount_base != self.open_order.executed_amount_base
+            ) or (self.take_profit_order.order and self.take_profit_price != self.take_profit_order.order.price):
+                self.renew_take_profit_order()
+        elif self.take_profit_condition():
+            self.place_close_order(close_type=CloseType.TAKE_PROFIT)
+
     @property
     def end_open_order_time(self):
         if not self.position_config.open_order_time_limit:
@@ -67,24 +80,9 @@ class SafeProfitPositionExecutor(PositionExecutor):
         current_price = self.get_price(self.exchange, self.trading_pair)
         amount_in_quote = self.entry_price * (self.filled_amount if self.filled_amount > Decimal("0") else self.amount)
         quote_asset = self.trading_pair.split("-")[1]
-        if self.is_closed:
-            lines.extend([f"""
-| Entry price: {self.entry_price:.6f} | Close price: {self.close_price:.6f} | Amount: {amount_in_quote:.4f} {quote_asset}
-"""])
-        if self.is_closed:
-            lines.extend([f"""
-| Trading Pair: {self.trading_pair} | Exchange: {self.exchange} | Side: {self.side}
-| Entry price: {self.entry_price:.6f} | Close price: {self.close_price:.6f} | Amount: {amount_in_quote:.4f} {quote_asset}
-| Realized PNL: {self.trade_pnl_quote:.6f} {quote_asset} | Total Fee: {self.cum_fee_quote:.6f} {quote_asset}
-| PNL (%): {self.net_pnl * 100:.2f}% | PNL (abs): {self.net_pnl_quote:.6f} {quote_asset} | Close Type: {self.close_type}
-"""])
-        else:
-            lines.extend([f"""
-| Trading Pair: {self.trading_pair} | Exchange: {self.exchange} | Side: {self.side} |
-| Entry price: {self.entry_price:.6f} | Close price: {self.close_price:.6f} | Amount: {amount_in_quote:.4f} {quote_asset}
-| Unrealized PNL: {self.trade_pnl_quote:.6f} {quote_asset} | Total Fee: {self.cum_fee_quote:.6f} {quote_asset}
-| PNL (%): {self.net_pnl * 100:.2f}% | PNL (abs): {self.net_pnl_quote:.6f} {quote_asset} | Close Type: {self.close_type}
-        """])
+        # if self.is_closed:
+        created_at = datetime.fromtimestamp(self.position_config.timestamp).strftime("%Y-%m-%d %H:%M:%S")
+        lines.extend([f"{created_at}  {self.entry_price:8.6f}-{self.close_price:8.6f} {self.net_pnl * 100:7.2f}% {self.net_pnl_quote:7.4f} {quote_asset}   Amount: {amount_in_quote:7.4f} {quote_asset}"])
 
         if self.executor_status == PositionExecutorStatus.ACTIVE_POSITION:
             progress = 0
@@ -113,6 +111,8 @@ class SafeProfitPositionExecutor(PositionExecutor):
             if self.trailing_stop_config:
                 lines.extend([
                     f"Trailing stop status: {self._trailing_stop_activated} | Trailing stop price: {self._trailing_stop_price:.5f}"])
-            lines.extend([
-                "-----------------------------------------------------------------------------------------------------------"])
         return lines
+
+    @property
+    def cum_fee_quote(self):
+        return self.open_order.cum_fees + self.close_order.cum_fees + self.take_profit_order.cum_fees

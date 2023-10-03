@@ -18,9 +18,11 @@ from hummingbot.core.event.events import (
     SellOrderCompletedEvent,
 )
 from hummingbot.smart_components.position_executor.data_types import PositionExecutorStatus
+from hummingbot.smart_components.position_executor.position_executor import PositionExecutor
 from scripts.aaa_hilow import HiLow
 
 s_decimal_nan = Decimal("NaN")
+fee = Decimal(0.00075)
 
 
 class EmulatedHiLow(HiLow):
@@ -87,33 +89,38 @@ class EmulatedHiLow(HiLow):
         return True
 
 
+def renew_take_profit_order(strategy: EmulatedHiLow, e: PositionExecutor, current_timestamp: float):
+    if e.executor_status == PositionExecutorStatus.ACTIVE_POSITION and e.take_profit_order.order_id:
+        if not math.isnan(strategy.sell_order_price) and not math.isnan(strategy.sell_order_amount):
+            # e.position_config.take_profit_order_type
+            e.take_profit_order.order = InFlightOrder(
+                e.take_profit_order.order_id,
+                e.trading_pair,
+                OrderType.LIMIT,
+                TradeType.SELL,
+                strategy.sell_order_amount,
+                current_timestamp,
+                strategy.sell_order_price,
+                e.take_profit_order.order_id,
+            )
+
+
 def emulate__take_profit(strategy: EmulatedHiLow,
                          current_timestamp: float,
                          current_max_price: float) -> None:
     if not math.isnan(strategy.sell_order_price):
         executor = strategy.active_executors[0]
+        renew_take_profit_order(strategy, executor, current_timestamp)
 
-        if executor.executor_status == PositionExecutorStatus.ACTIVE_POSITION:
-            if not executor.take_profit_order.order:
-                executor.take_profit_order.order = InFlightOrder(
-                    executor.take_profit_order.order_id,
-                    executor.trading_pair,
-                    OrderType.LIMIT,
-                    TradeType.SELL,
-                    strategy.sell_order_amount,
-                    current_timestamp,
-                    strategy.sell_order_price,
-                    executor.take_profit_order.order_id,
-                )
-
-            if strategy.sell_order_price <= current_max_price:
+        if executor.executor_status == PositionExecutorStatus.ACTIVE_POSITION and executor.take_profit_order.order_id:
+            if executor.take_profit_order.order.price <= current_max_price:
                 executor.process_order_completed_event(None, None, SellOrderCompletedEvent(
                     timestamp=current_timestamp,
                     order_id=executor.take_profit_order.order_id,
                     base_asset='TUSD',
                     quote_asset='USD',
-                    base_asset_amount=strategy.sell_order_amount,
-                    quote_asset_amount=strategy.sell_order_amount,
+                    base_asset_amount=executor.take_profit_order.order.amount,
+                    quote_asset_amount=executor.take_profit_order.order.amount,
                     order_type=OrderType.LIMIT,
                 ))
 
@@ -123,16 +130,15 @@ def emulate__take_profit(strategy: EmulatedHiLow,
                     executor.take_profit_order.order_id,
                     executor.trading_pair,
                     current_timestamp,
-                    strategy.sell_order_price,
-                    strategy.sell_order_amount,
-                    strategy.sell_order_amount,
+                    executor.take_profit_order.order.price,
+                    executor.take_profit_order.order.amount,
+                    executor.take_profit_order.order.amount,
                     TradeFeeBase.new_spot_fee(
                         fee_schema=TradeFeeSchema(),
                         trade_type=TradeType.SELL,
+                        percent=fee
                     )
                 )}
-                # executor.take_profit_order._order.average_executed_price = strategy.sell_order_price
-
                 strategy.sell_order_price = s_decimal_nan
                 strategy.sell_order_amount = s_decimal_nan
 
@@ -151,6 +157,21 @@ def emulate__stop_loss(strategy: EmulatedHiLow,
             executor.stop_loss_price,
             executor.close_order.order_id,
         )
+        executor.close_order.order.order_fills = {'x': TradeUpdate(
+            executor.close_order.order_id,
+            executor.close_order.order_id,
+            executor.close_order.order_id,
+            executor.trading_pair,
+            current_timestamp,
+            executor.stop_loss_price,
+            strategy.sell_order_amount,
+            strategy.sell_order_amount,
+            TradeFeeBase.new_spot_fee(
+                fee_schema=TradeFeeSchema(),
+                trade_type=TradeType.SELL,
+                percent=fee
+            )
+        )}
         executor.process_order_completed_event(None, None, SellOrderCompletedEvent(
             timestamp=current_timestamp,
             order_id=executor.close_order.order_id,
@@ -183,10 +204,11 @@ def emulate__open_order_if_exists(strategy: EmulatedHiLow, current_timestamp: fl
     if len(strategy.active_executors) > 0:
         executor = strategy.active_executors[0]
 
-        if executor.executor_status == PositionExecutorStatus.NOT_STARTED:
-            if not executor.open_order.order and not math.isnan(strategy.buy_order_price) and not math.isnan(strategy.buy_order_amount):
+        if executor.open_order.order_id and executor.executor_status == PositionExecutorStatus.NOT_STARTED:
+            if not executor.open_order.order and not math.isnan(strategy.buy_order_price) and not math.isnan(
+                    strategy.buy_order_amount):
                 executor.open_order.order = InFlightOrder(
-                    executor.close_order.order_id,
+                    executor.open_order.order_id,
                     executor.trading_pair,
                     OrderType.LIMIT,
                     TradeType.BUY,
@@ -199,7 +221,22 @@ def emulate__open_order_if_exists(strategy: EmulatedHiLow, current_timestamp: fl
                 strategy.buy_order_amount = s_decimal_nan
 
             if executor.open_order.order.price >= min_market_price:
-                executor.open_order._order.executed_amount_base = executor.open_order.order.amount
+                executor.open_order.order.executed_amount_base = executor.open_order.order.amount
+                executor.open_order.order.order_fills = {'x': TradeUpdate(
+                    executor.open_order.order_id,
+                    executor.open_order.order_id,
+                    executor.open_order.order_id,
+                    executor.trading_pair,
+                    current_timestamp,
+                    executor.open_order.order.price,
+                    executor.open_order.order.amount,
+                    executor.open_order.order.amount,
+                    TradeFeeBase.new_spot_fee(
+                        fee_schema=TradeFeeSchema(),
+                        trade_type=TradeType.BUY,
+                        percent=fee
+                    )
+                )}
 
                 # completed buy order
                 # now executor_status == PositionExecutorStatus.ACTIVE_POSITION
@@ -239,8 +276,8 @@ class BrokerEmulator:
                 continue
 
             executor = strategy.active_executors[0]
-
             await executor.control_task()
+
             if executor.executor_status == PositionExecutorStatus.NOT_STARTED:
                 if emulate__open_order_if_exists(strategy, current_timestamp, cur_df['low']):
                     # don't sell in first candle in ACTIVE_POSITION
@@ -251,6 +288,7 @@ class BrokerEmulator:
 
             if executor.executor_status == PositionExecutorStatus.ACTIVE_POSITION:
                 connector._mid_price = Decimal(cur_df['high'])
+                renew_take_profit_order(strategy, executor, current_timestamp)
                 await executor.control_task()
                 emulate__take_profit(strategy, current_timestamp, cur_df['high'])
 
